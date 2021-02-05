@@ -4,14 +4,11 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.ContentValues
 import android.content.Context
-import android.content.Intent
-import android.graphics.pdf.PdfDocument
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import androidx.annotation.RequiresApi
-import androidx.core.app.ActivityCompat.startActivityForResult
 import androidx.core.app.NotificationCompat
 import androidx.work.CoroutineWorker
 import androidx.work.ForegroundInfo
@@ -51,7 +48,7 @@ class DownloadWorker(context: Context, parameters: WorkerParameters) :
             setForeground(createForegroundInfo(progress))
 
             val body = download()
-            if (writeResponseBodyToDisk(body)) {
+            if (writeResponseBodyToDisk(body, context = applicationContext)) {
                 Result.success()
             } else {
                 Result.failure()
@@ -131,7 +128,7 @@ class DownloadWorker(context: Context, parameters: WorkerParameters) :
     }
 }
 
-private fun writeResponseBodyToDisk(body: ResponseBody?): Boolean {
+private fun writeResponseBodyToDisk(body: ResponseBody?, context: Context): Boolean {
     if (body == null) {
         return false
     }
@@ -144,11 +141,19 @@ private fun writeResponseBodyToDisk(body: ResponseBody?): Boolean {
 //        flags = Intent.FLAG_GRANT_READ_URI_PERMISSION
 //        putExtra(Intent.EXTRA_TITLE, "invoice.pdf")
 //    }
-//    startActivityForResult(intent, CREATE_FILE)
+//
+//    context.startActivity(intent)
+
+    val path = context.getExternalFilesDir(null)?.absolutePath
+
+    val dir = File(path)
+    if (!dir.exists()) dir.mkdirs()
+
+    val newFile = File(dir, "newFile.pdf")
+
+    Timber.d(newFile.toString())
+
     return try {
-
-
-
 
         var inputStream: InputStream? = null
         var outputStream: OutputStream? = null
@@ -181,6 +186,7 @@ private fun writeResponseBodyToDisk(body: ResponseBody?): Boolean {
         false
     }
 }
+
 
 // try {
 //        contentResolver.openFileDescriptor(uri, "w")?.use {
