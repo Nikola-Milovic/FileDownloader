@@ -49,6 +49,7 @@ class DownloadWorker(context: Context, parameters: WorkerParameters) :
             setForeground(createForegroundInfo(progress))
 
             val body = download()
+            Timber.d(body.toString())
             if (body != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 if (writeResponseBodyToDisk(body)) {
                     return@withContext Result.success()
@@ -61,7 +62,7 @@ class DownloadWorker(context: Context, parameters: WorkerParameters) :
         }
     }
 
-    private suspend fun download() = suspendCoroutine<ResponseBody?> { cont ->
+    private suspend fun download() = suspendCoroutine<FileDownloadResponse?> { cont ->
         Timber.d("Download")
         val retrofit = Retrofit.Builder()
                 .baseUrl("http://10.0.2.2:3000/")
@@ -74,7 +75,8 @@ class DownloadWorker(context: Context, parameters: WorkerParameters) :
             override fun onResponse(call: Call<ResponseBody>, response: Response<ResponseBody>) {
                 if (response.isSuccessful) {
                     Timber.d(response.toString())
-                    cont.resume(response.body())
+                    Timber.d(response.headers().toString())
+                    cont.resume(FileDownloadResponse(response.body(), response.headers()["File-Name"]!!, response.headers().get("Size")!!.toLong()))
                     //val writtenToDisk: Boolean = writeResponseBodyToDisk(response.body()!!)
                 }
             }
@@ -83,9 +85,10 @@ class DownloadWorker(context: Context, parameters: WorkerParameters) :
                 Timber.d("Failure $t")
                 cont.resume(null)
             }
-
         })
     }
+
+    inner class FileDownloadResponse(val body : ResponseBody?, val fileName : String, val fileSize : Long)
 
     // Creates an instance of ForegroundInfo which can be used to update the
     // ongoing notification.
@@ -133,24 +136,24 @@ class DownloadWorker(context: Context, parameters: WorkerParameters) :
     }
 
     @RequiresApi(Build.VERSION_CODES.Q)
-    private fun writeResponseBodyToDisk(body: ResponseBody?): Boolean {
-        if (body == null) {
+    private fun writeResponseBodyToDisk(body: FileDownloadResponse?): Boolean {
+        if (body?.body == null) {
             return false
         }
 
-        return savePDFFile(body.byteStream(), body.contentLength()) == null
+        return savePDFFile(body.body.byteStream(), body.fileSize, body.fileName) == null
 
     }
 
     //https://stackoverflow.com/questions/63480192/how-to-save-pdf-file-in-a-media-store-in-android-10-and-above-using-java
     @RequiresApi(Build.VERSION_CODES.Q)
-    fun savePDFFile(inputStream: InputStream, fileSize: Long): Uri? {
+    fun savePDFFile(inputStream: InputStream, fileSize: Long, fileName: String): Uri? {
         val contentResolver = applicationContext.contentResolver
         val relativeLocation = Environment.DIRECTORY_DOCUMENTS
         val subfolder = "/dir"
 
         val contentValues = ContentValues()
-        contentValues.put(MediaStore.MediaColumns.DISPLAY_NAME, "Display name");
+        contentValues.put(MediaStore.MediaColumns.DISPLAY_NAME, fileName);
         contentValues.put(MediaStore.MediaColumns.MIME_TYPE, "application/pdf");
         contentValues.put(MediaStore.MediaColumns.RELATIVE_PATH, relativeLocation);
         contentValues.put(MediaStore.Video.Media.TITLE, "SomeName");
@@ -184,7 +187,8 @@ class DownloadWorker(context: Context, parameters: WorkerParameters) :
                     read = inputStream.read(buf)
                     fileSizeDownloaded += read.toLong()
                     if (fileSizeDownloaded % 4096 * 3 == 0L) {
-                        setForegroundAsync(createForegroundInfo("Downloaded $fileSizeDownloaded out of $fileSize"))
+                        //setForegroundAsync(createForegroundInfo("Downloaded $fileSizeDownloaded out of $fileSize"))
+                        Timber.d("Downloaded $fileSizeDownloaded out of $fileSize")
                     }
                 }
                 out.close();
