@@ -7,6 +7,7 @@ import android.content.Context
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.os.ParcelFileDescriptor
 import android.provider.MediaStore
 import androidx.annotation.RequiresApi
 import androidx.core.app.NotificationCompat
@@ -48,10 +49,14 @@ class DownloadWorker(context: Context, parameters: WorkerParameters) :
             setForeground(createForegroundInfo(progress))
 
             val body = download()
-            if (writeResponseBodyToDisk(body, context = applicationContext)) {
-                Result.success()
+            if (body != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                if (writeResponseBodyToDisk(body)) {
+                    return@withContext Result.success()
+                } else {
+                    return@withContext Result.failure()
+                }
             } else {
-                Result.failure()
+                return@withContext Result.failure()
             }
         }
     }
@@ -126,136 +131,130 @@ class DownloadWorker(context: Context, parameters: WorkerParameters) :
     companion object {
         const val CHANNEL_ID = "dprogress"
     }
-}
 
-private fun writeResponseBodyToDisk(body: ResponseBody?, context: Context): Boolean {
-    if (body == null) {
-        return false
+    @RequiresApi(Build.VERSION_CODES.Q)
+    private fun writeResponseBodyToDisk(body: ResponseBody?): Boolean {
+        if (body == null) {
+            return false
+        }
+
+        return savePDFFile(body.byteStream(), body.contentLength()) == null
+
     }
 
-//    val CREATE_FILE = 1
-//
-//    val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
-//        addCategory(Intent.CATEGORY_OPENABLE)
-//        type = "application/pdf"
-//        flags = Intent.FLAG_GRANT_READ_URI_PERMISSION
-//        putExtra(Intent.EXTRA_TITLE, "invoice.pdf")
-//    }
-//
-//    context.startActivity(intent)
+    //https://stackoverflow.com/questions/63480192/how-to-save-pdf-file-in-a-media-store-in-android-10-and-above-using-java
+    @RequiresApi(Build.VERSION_CODES.Q)
+    fun savePDFFile(inputStream: InputStream, fileSize: Long): Uri? {
+        val contentResolver = applicationContext.contentResolver
+        val relativeLocation = Environment.DIRECTORY_DOCUMENTS
+        val subfolder = "/dir"
 
-    val path = context.getExternalFilesDir(null)?.absolutePath
+        val contentValues = ContentValues()
+        contentValues.put(MediaStore.MediaColumns.DISPLAY_NAME, "Display name");
+        contentValues.put(MediaStore.MediaColumns.MIME_TYPE, "application/pdf");
+        contentValues.put(MediaStore.MediaColumns.RELATIVE_PATH, relativeLocation);
+        contentValues.put(MediaStore.Video.Media.TITLE, "SomeName");
+        contentValues.put(MediaStore.Video.Media.DATE_ADDED, System.currentTimeMillis() / 1000);
+        contentValues.put(MediaStore.Video.Media.DATE_TAKEN, System.currentTimeMillis());
+        var stream: OutputStream? = null
+        var uri: Uri? = null
 
-    val dir = File(path)
-    if (!dir.exists()) dir.mkdirs()
-
-    val newFile = File(dir, "newFile.pdf")
-
-    Timber.d(newFile.toString())
-
-    return try {
-
-        var inputStream: InputStream? = null
-        var outputStream: OutputStream? = null
         try {
-            val fileReader = ByteArray(4096)
-            val fileSize = body.contentLength()
-            var fileSizeDownloaded: Long = 0
-            inputStream = body.byteStream()
-            outputStream = FileOutputStream(newFile)
-            while (true) {
-                val read: Int = inputStream.read(fileReader)
-                if (read == -1) {
-                    break
-                }
-                outputStream.write(fileReader, 0, read)
-                fileSizeDownloaded += read.toLong()
-                Timber.d("file download: $fileSizeDownloaded of $fileSize");
+            val contentUri = MediaStore.Files.getContentUri("external");
+            uri = contentResolver.insert(contentUri, contentValues)
+            if (uri == null) {
+                return null
             }
-            outputStream.flush()
-            true
+            val pfd: ParcelFileDescriptor?
+            try {
+                pfd = applicationContext.contentResolver.openFileDescriptor(uri, "w")
+
+                if (pfd == null) {
+                    return null
+                }
+
+                val out = FileOutputStream(pfd.fileDescriptor);
+                //Progress
+                var fileSizeDownloaded = 0L
+
+                val buf = ByteArray(4096)
+                var read = inputStream.read(buf)
+                while (read > 0) {
+                    out.write(buf, 0, read);
+                    read = inputStream.read(buf)
+                    fileSizeDownloaded += read.toLong()
+                    if (fileSizeDownloaded % 4096 * 3 == 0L) {
+                        setForegroundAsync(createForegroundInfo("Downloaded $fileSizeDownloaded out of $fileSize"))
+                    }
+                }
+                out.close();
+                inputStream.close();
+                pfd.close();
+            } catch (e: Exception) {
+                Timber.e(e)
+            }
+
+            contentValues.clear();
+            contentValues.put(MediaStore.Video.Media.IS_PENDING, 0);
+            applicationContext.contentResolver.update(uri, contentValues, null, null);
+            stream = contentResolver.openOutputStream(uri)
+            if (stream == null) {
+                throw IOException("Failed to get output stream.");
+            }
+            return uri
         } catch (e: IOException) {
-            Timber.e(e);
-            false
+            // Don't leave an orphan entry in the MediaStore
+            if (uri != null) contentResolver.delete(uri, null, null);
+            throw e;
         } finally {
-            inputStream?.close()
-            outputStream?.close()
+            stream?.close()
         }
-    } catch (e: IOException) {
-        Timber.e(e);
-        false
     }
 }
 
 
-// try {
-//        contentResolver.openFileDescriptor(uri, "w")?.use {
-//            FileOutputStream(it.fileDescriptor).use {
-//                it.write(
-//                    ("Overwritten at ${System.currentTimeMillis()}\n")
-//                        .toByteArray()
-//                )
-//            }
-//        }
-//    } catch (e: FileNotFoundException) {
-//        e.printStackTrace()
-//    } catch (e: IOException) {
-//        e.printStackTrace()
+// val path = context.getExternalFilesDir(null)?.absolutePath + "/dir"
+//
+//    val dir = File(path)
+//    if (!dir.exists()) dir.mkdirs()
+//
+//    val newFile = File(dir, "newFile.pdf")
+//
+//
+//    try {
+//        newFile.createNewFile()
+//    } catch (e: Exception) {
+//        Timber.e(e)
 //    }
-
-fun test(context: Context) {
-    val contentResolver = context.contentResolver
-    val name = "myfile"
-    val relativeLocation = Environment.DIRECTORY_PICTURES + File.pathSeparator + "AppName"
-
-    val contentValues = ContentValues().apply {
-//        put(MediaStore.Images.ImageColumns.DISPLAY_NAME, name)
-//        put(MediaStore.MediaColumns.MIME_TYPE, "image/png")
-        put(MediaStore.Downloads.DISPLAY_NAME, name)
-        put(MediaStore.DownloadColumns.MIME_TYPE, "application/pdf")
-
-        // without this part causes "Failed to create new MediaStore record" exception to be invoked (uri is null below)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            put(MediaStore.Downloads.RELATIVE_PATH, relativeLocation)
-        }
-    }
-
-    val contentUri = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
-        MediaStore.Downloads.EXTERNAL_CONTENT_URI
-    } else {
-        TODO("VERSION.SDK_INT < Q")
-    }
-    var stream: OutputStream? = null
-    var uri: Uri? = null
-
-    try {
-        uri = contentResolver.insert(contentUri, contentValues)
-        if (uri == null) {
-            throw IOException("Failed to create new MediaStore record.")
-        }
-
-        stream = contentResolver.openOutputStream(uri)
-
-        if (stream == null) {
-            throw IOException("Failed to get output stream.")
-        }
-
-//        Snackbar.make(mCoordinator, R.string.image_saved_success, Snackbar.LENGTH_INDEFINITE).setAction("Open") {
-//            val intent = Intent()
-//            intent.type = "image/*"
-//            intent.action = Intent.ACTION_VIEW
-//            intent.data = contentUri
-//            startActivity(Intent.createChooser(intent, "Select Gallery App"))
-//        }.show()
-
-    } catch (e: IOException) {
-        if (uri != null) {
-            contentResolver.delete(uri, null, null)
-        }
-
-        throw IOException(e)
-
-    } finally {
-        stream?.close()
-    }
-}
+//return try {
+//
+//        var inputStream: InputStream? = null
+//        var outputStream: OutputStream? = null
+//        try {
+//            val fileReader = ByteArray(4096)
+//            val fileSize = body.contentLength()
+//            var fileSizeDownloaded: Long = 0
+//            inputStream = body.byteStream()
+//            outputStream = FileOutputStream(newFile)
+//            while (true) {
+//                val read: Int = inputStream.read(fileReader)
+//                if (read == -1) {
+//                    break
+//                }
+//                outputStream.write(fileReader, 0, read)
+//                fileSizeDownloaded += read.toLong()
+//                Timber.d("file download: $fileSizeDownloaded of $fileSize");
+//            }
+//            outputStream.flush()
+//            true
+//        } catch (e: IOException) {
+//            Timber.e(e);
+//            false
+//        } finally {
+//            inputStream?.close()
+//            outputStream?.close()
+//        }
+//    } catch (e: IOException) {
+//        Timber.e(e);
+//        false
+//    }
